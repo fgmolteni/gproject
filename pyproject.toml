@@ -1,0 +1,26 @@
+[project]
+name = "gproject"
+version = "0.1.0"
+description = "TUI planificadora de tareas con diagrama de Gantt"
+requires-python = ">=3.11"
+dependencies = [
+    "textual>=0.80",
+]
+
+[project.scripts]
+gproject = "gproject.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.11.19,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "textual-dev>=1.8.0",
+]
