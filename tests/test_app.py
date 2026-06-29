@@ -8,7 +8,7 @@ os.environ["GPROJECT_DB"] = "memory"
 
 import pytest
 
-from textual.widgets import Button, Input
+from textual.widgets import Button, Input, Select
 
 from gproject.app import GProjectApp
 from gproject.modals.filter_bar import FilterBar
@@ -40,6 +40,20 @@ async def test_navegacion_y_zoom():
         await pilot.press("minus")
         await pilot.pause()
         assert gantt.nivel == nivel_inicial + 1
+
+
+async def test_ciclar_zoom_con_z():
+    app = GProjectApp(seed=True)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        gantt = app.screen.query_one(GanttView)
+        assert gantt.nivel == 0 and gantt.nivel_zoom_label == "Día"
+        await pilot.press("z")
+        await pilot.pause()
+        assert gantt.nivel == 1 and gantt.nivel_zoom_label == "Semana"
+        await pilot.press("z", "z")  # Mes → vuelve a Día
+        await pilot.pause()
+        assert gantt.nivel == 0
 
 
 async def test_abrir_y_cerrar_modales():
@@ -130,6 +144,70 @@ async def test_alternar_a_vista_kanban():
         assert app.screen.vista == "kanban"
         assert app.screen.query_one(KanbanView).display
         assert not app.screen.query_one(GanttView).display
+
+
+async def test_exportar_csv_crea_archivo(tmp_path, monkeypatch):
+    """Pulsar 'x' abre el modal; al exportar en CSV crea el archivo con encabezados."""
+    monkeypatch.chdir(tmp_path)
+    app = GProjectApp(seed=True)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("x")
+        await pilot.pause()
+        from gproject.modals.export_form import ExportModal
+
+        assert isinstance(app.screen, ExportModal)
+        app.screen.query_one("#exportar", Button).press()
+        await pilot.pause()
+
+    csvs = list(tmp_path.glob("*_tareas_*.csv"))
+    assert len(csvs) == 1
+    contenido = csvs[0].read_text(encoding="utf-8-sig")
+    lineas = contenido.splitlines()
+    assert lineas[0].startswith("ID,Tarea,Nivel")
+    assert len(lineas) == 12  # encabezado + 11 tareas del seed
+
+
+async def test_exportar_xlsx_crea_archivo(tmp_path, monkeypatch):
+    """Elegir Excel en el modal genera un .xlsx legible con una fila por tarea."""
+    monkeypatch.chdir(tmp_path)
+    app = GProjectApp(seed=True)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("x")
+        await pilot.pause()
+        app.screen.query_one("#formato", Select).value = "xlsx"
+        await pilot.pause()
+        app.screen.query_one("#exportar", Button).press()
+        await pilot.pause()
+
+    xlsxs = list(tmp_path.glob("*_tareas_*.xlsx"))
+    assert len(xlsxs) == 1
+    from openpyxl import load_workbook
+
+    ws = load_workbook(xlsxs[0]).active
+    assert ws["A1"].value == "ID" and ws["B1"].value == "Tarea"
+    assert ws.max_row == 12  # encabezado + 11 tareas
+
+
+def test_exportar_csv_orden_jerarquico(tmp_path):
+    """exportar_csv ordena padres antes que hijos y marca el nivel."""
+    import csv as _csv
+
+    from gproject.db import Database
+    from gproject import export
+
+    db = Database(":memory:")
+    pid = db.create_proyecto("P")
+    a = db.create_tarea(pid, "A")
+    db.create_tarea(pid, "A.1", parent_id=a)
+    db.create_tarea(pid, "B")
+    ruta = export.exportar_csv(db.list_tareas(pid), db.list_dependencias(pid),
+                               tmp_path / "t.csv")
+    db.close()
+    filas = list(_csv.reader(ruta.open(encoding="utf-8-sig")))
+    titulos = [(f[1], f[2]) for f in filas[1:]]  # (Tarea, Nivel)
+    assert titulos == [("A", "0"), ("A.1", "1"), ("B", "0")]
 
 
 async def test_kanban_cambia_estado_con_espacio():

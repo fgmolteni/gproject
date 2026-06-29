@@ -61,6 +61,7 @@ class GanttView(ScrollView):
         Binding("down,j", "cursor(1)", "Bajar", show=False),
         Binding("left", "desplazar(-4)", "◄ línea de tiempo", show=False),
         Binding("right", "desplazar(4)", "línea de tiempo ►", show=False),
+        Binding("z", "ciclar_zoom", "Zoom Día/Sem/Mes", show=True),
         Binding("plus,equals_sign,=", "zoom(-1)", "Zoom +", show=False),
         Binding("minus", "zoom(1)", "Zoom -", show=False),
         Binding("c", "colapsar", "Colapsar", show=False),
@@ -79,6 +80,11 @@ class GanttView(ScrollView):
     class AlternarEstado(Message):
         def __init__(self, tarea: Tarea) -> None:
             self.tarea = tarea
+            super().__init__()
+
+    class ZoomCambiado(Message):
+        def __init__(self, nivel: int) -> None:
+            self.nivel = nivel
             super().__init__()
 
     def __init__(self) -> None:
@@ -267,11 +273,18 @@ class GanttView(ScrollView):
         estilo = Style(color=fg, bgcolor=bg, bold=fila.tiene_hijos)
         return [Segment(linea[:PANEL_ANCHO].ljust(PANEL_ANCHO), estilo)]
 
-    def _render_timeline(self, fila: Fila, idx: int, tl_w: int) -> list[Segment]:
-        if tl_w <= 0:
-            return []
+    def _celdas_timeline(self, fila: Fila, idx: int) -> list[tuple[str, Style]]:
+        """Celdas de la línea de tiempo de una fila, ancho completo (sin recorte)."""
         base = Style(bgcolor=COL_PANEL_BG)
         celdas: list[tuple[str, Style]] = [(" ", base)] * self._total_px
+
+        # Grilla vertical: separa las columnas de tiempo para que cada unidad
+        # (semana/mes) se lea como un bloque. Solo en Semana/Mes (en Día sería ruido).
+        estilo_grilla = Style(color=COL_GRID, bgcolor=COL_PANEL_BG)
+        hay_grilla = self.nivel >= 1
+        if hay_grilla:
+            for px in range(self._cw, self._total_px, self._cw):
+                celdas[px] = ("│", estilo_grilla)
 
         # marcador de hoy
         hoy_px = self._px_inicio(date.today())
@@ -297,10 +310,21 @@ class GanttView(ScrollView):
                 lleno = s + round(ancho_barra * fila.progreso / 100)
                 estilo_barra = Style(color=color, bgcolor=COL_PANEL_BG)
                 for px in range(s, e + 1):
-                    if 0 <= px < self._total_px:
+                    if not (0 <= px < self._total_px):
+                        continue
+                    # Las fronteras internas de columna seccionan la barra en unidades.
+                    if hay_grilla and px != s and px % self._cw == 0:
+                        celdas[px] = ("│", estilo_grilla)
+                    else:
                         ch = "█" if px < lleno else "░"
                         celdas[px] = (ch, estilo_barra)
+        return celdas
 
+    def _render_timeline(self, fila: Fila, idx: int, tl_w: int) -> list[Segment]:
+        if tl_w <= 0:
+            return []
+        base = Style(bgcolor=COL_PANEL_BG)
+        celdas = self._celdas_timeline(fila, idx)
         # recorte a la ventana visible
         ini = self.desplazamiento
         ventana = celdas[ini : ini + tl_w]
@@ -308,26 +332,20 @@ class GanttView(ScrollView):
             ventana += [(" ", base)] * (tl_w - len(ventana))
         return _a_segmentos(ventana)
 
-    def _render_header(self, y: int, tl_w: int) -> tuple[list[Segment], list[Segment]]:
-        if y == 0:
-            izq = [Segment(" Tareas".ljust(PANEL_ANCHO),
-                           Style(color="#c8d0e0", bgcolor="#24283b", bold=True))]
-        else:
-            izq = [Segment(" planificación".ljust(PANEL_ANCHO),
-                           Style(color="#565f89", bgcolor="#24283b"))]
-        if tl_w <= 0:
-            return izq, []
-
+    def _celdas_header_der(self, y: int) -> list[tuple[str, Style]]:
+        """Celdas de la franja derecha de la cabecera, ancho completo (sin recorte)."""
         base = Style(color="#565f89", bgcolor="#24283b")
+        titulo = Style(color="#7aa2f7", bgcolor="#24283b", bold=True)
         celdas: list[tuple[str, Style]] = [(" ", base)] * self._total_px
         n_cols = max(self._total_px // self._cw, 1)
+
         for c in range(n_cols):
             fecha_c = self._origen + timedelta(days=c * self._dpc)
             px = c * self._cw
             if y == 0:
                 if c == 0 or fecha_c.day <= self._dpc:
                     etq = f"{MESES[fecha_c.month]} {str(fecha_c.year)[2:]}"
-                    _escribir(celdas, px, etq, Style(color="#7aa2f7", bgcolor="#24283b", bold=True))
+                    _escribir(celdas, px, etq, titulo)
             else:
                 if self.nivel == 0:
                     etq = f"{fecha_c.day:>2d}"
@@ -340,7 +358,20 @@ class GanttView(ScrollView):
         hoy_px = self._px_inicio(date.today())
         if 0 <= hoy_px < self._total_px:
             celdas[hoy_px] = ("┊" if y == 1 else "▼", Style(color=COL_HOY, bgcolor="#24283b"))
+        return celdas
 
+    def _render_header(self, y: int, tl_w: int) -> tuple[list[Segment], list[Segment]]:
+        if y == 0:
+            izq = [Segment(" Tareas".ljust(PANEL_ANCHO),
+                           Style(color="#c8d0e0", bgcolor="#24283b", bold=True))]
+        else:
+            izq = [Segment(" planificación".ljust(PANEL_ANCHO),
+                           Style(color="#565f89", bgcolor="#24283b"))]
+        if tl_w <= 0:
+            return izq, []
+
+        base = Style(color="#565f89", bgcolor="#24283b")
+        celdas = self._celdas_header_der(y)
         ini = self.desplazamiento
         ventana = celdas[ini : ini + tl_w]
         if len(ventana) < tl_w:
@@ -372,6 +403,12 @@ class GanttView(ScrollView):
 
     def action_zoom(self, delta: int) -> None:
         self.nivel = max(0, min(self.nivel + delta, len(ZOOM_NIVELES) - 1))
+        self.post_message(self.ZoomCambiado(self.nivel))
+
+    def action_ciclar_zoom(self) -> None:
+        """Cicla Día → Semana → Mes → Día (tecla robusta en cualquier teclado)."""
+        self.nivel = (self.nivel + 1) % len(ZOOM_NIVELES)
+        self.post_message(self.ZoomCambiado(self.nivel))
 
     def action_colapsar(self) -> None:
         fila = self.filas[self.cursor] if self.filas else None

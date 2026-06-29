@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Footer, Header, Static
 
+from gproject import export
 from gproject.db import CycleError
 from gproject.models import PRIORIDAD_COLOR, Tarea
 from gproject.modals.confirm import ConfirmModal
 from gproject.modals.dependency import DependencyModal
+from gproject.modals.export_form import ExportModal
 from gproject.modals.filter_bar import FilterBar
 from gproject.modals.project_form import ProjectForm
 from gproject.modals.project_picker import ProjectPicker
@@ -25,7 +29,7 @@ CICLO_ESTADO = {"todo": "doing", "doing": "done", "done": "todo"}
 AYUDA = """[b]Navegación[/b]
   ↑/↓ (k/j)   mover cursor
   ←/→         desplazar tiempo / cambiar columna
-  +/-         zoom (Día / Semana / Mes)
+  z  o  +/-   zoom (Día / Semana / Mes)
   c           colapsar/expandir fase
   espacio     cambiar estado de la tarea
 
@@ -34,7 +38,7 @@ AYUDA = """[b]Navegación[/b]
   e  editar             d  borrar
   D  dependencias       M  marcar/quitar hito
   v  Gantt/Kanban       /  buscar/filtrar
-  p  cambiar proyecto
+  p  cambiar proyecto   x  exportar CSV/Excel
   ?  ayuda              q  salir
 
 [b]Leyenda[/b]
@@ -60,6 +64,7 @@ class MainScreen(Screen):
         Binding("D", "dependencias", "Deps"),
         Binding("M", "hito", "Hito"),
         Binding("v", "alternar_vista", "Vista"),
+        Binding("x", "exportar", "Exportar"),
         Binding("slash", "filtrar", "Filtrar"),
         Binding("p", "cambiar_proyecto", "Proyecto activo"),
         Binding("question_mark", "ayuda", "Ayuda"),
@@ -218,6 +223,12 @@ class MainScreen(Screen):
         if self.vista == "gantt":
             self._alternar_estado(message.tarea)
 
+    def on_gantt_view_zoom_cambiado(self, message: GanttView.ZoomCambiado) -> None:
+        pid = self._pid()
+        if pid is None:
+            return
+        self._actualizar_barra(self.db.get_proyecto(pid), self.db.list_tareas(pid))
+
     def on_kanban_view_tarea_resaltada(self, message: KanbanView.TareaResaltada) -> None:
         if self.vista == "kanban":
             self._actualizar_detalle(message.tarea)
@@ -355,6 +366,35 @@ class MainScreen(Screen):
                 self._recargar()
 
         self.app.push_screen(ProjectPicker(proyectos, self._pid()), elegir)
+
+    def action_exportar(self) -> None:
+        pid = self._pid()
+        if pid is None:
+            self.notify("No hay proyecto para exportar.", severity="warning")
+            return
+        if not self.db.list_tareas(pid):
+            self.notify("El proyecto no tiene tareas para exportar.", severity="warning")
+            return
+        self.app.push_screen(ExportModal(), self._exportar_con_opciones)
+
+    def _exportar_con_opciones(self, opts: dict | None) -> None:
+        if not opts:
+            return
+        pid = self._pid()
+        proyecto = self.db.get_proyecto(pid)
+        tareas = self.db.list_tareas(pid)
+        deps = self.db.list_dependencias(pid)
+        formato = opts["formato"]
+        ruta = Path.cwd() / export.nombre_archivo(proyecto.nombre, formato)
+        try:
+            if formato == "csv":
+                export.exportar_csv(tareas, deps, ruta)
+            else:
+                export.exportar_xlsx(tareas, deps, ruta)
+        except Exception as e:  # openpyxl ausente, permisos, etc.
+            self.notify(f"No se pudo exportar: {e}", severity="error", timeout=8)
+            return
+        self.notify(f"Tareas exportadas a {ruta}", timeout=6)
 
     def action_filtrar(self) -> None:
         def aplicar(f: dict | None) -> None:
